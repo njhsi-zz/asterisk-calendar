@@ -16,12 +16,6 @@ LIBS+=-lxml -lneon -lical
 CFLAGS+=-pipe -fPIC -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -D_REENTRANT -D_GNU_SOURCE -DAST_MODULE=\"res_calendar_caldav\"
 
 all: _all
-	@echo " +-------- app_espeak Build Complete --------+"
-	@echo " + app_espeak has successfully been built,   +"
-	@echo " + and can be installed by running:          +"
-	@echo " +                                           +"
-	@echo " +               make install                +"
-	@echo " +-------------------------------------------+"
 
 _all: res_calendar_caldav.so res_calendar.so
 
