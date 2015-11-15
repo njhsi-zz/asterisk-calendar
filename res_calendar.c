@@ -311,6 +311,7 @@ static struct ast_calendar_event *find_event(struct ao2_container *events, const
 
 struct ast_calendar_event *ast_calendar_unref_event(struct ast_calendar_event *event)
 {
+  ast_debug(10,"ast_calendar_unref_event: '%s' \n",event->summary);
 	ao2_ref(event, -1);
 	return NULL;
 }
@@ -345,6 +346,7 @@ static void eventlist_destructor(void *obj)
 
 	while ((entry = AST_LIST_REMOVE_HEAD(events, list))) {
 		ao2_ref(entry->event, -1);
+		ast_debug(10, "eventlist_destructor '%s'\n",entry->event->summary);
 		ast_free(entry);
 	}
 }
@@ -583,7 +585,7 @@ static void calendar_event_destructor(void *obj)
 	struct ast_calendar_event *event = obj;
 	struct ast_calendar_attendee *attendee;
 
-	ast_debug(3, "Destroying event for calendar '%s'\n", event->owner->name);
+	ast_debug(3, "Destroying event '%s' for calendar '%s'\n",event->summary, event->owner->name);
 	ast_string_field_free_memory(event);
 	while ((attendee = AST_LIST_REMOVE_HEAD(&event->attendees, next))) {
 		if (attendee->data) {
@@ -666,6 +668,8 @@ struct ao2_container *ast_calendar_event_container_alloc(void)
 static void event_notification_destroy(void *data)
 {
 	struct ast_calendar_event *event = data;
+
+	ast_debug(10,"event_notification_destroy: '%s'\n",event->summary);
 
 	event = ast_calendar_unref_event(event);
 
@@ -820,7 +824,7 @@ notify_cleanup:
 	if (chan) {
 		ast_channel_release(chan);
 	}
-
+	ast_debug(10,"do_notify: cleanup '%s' \n", event->summary);
 	event = ast_calendar_unref_event(event);
 
 	return NULL;
@@ -878,7 +882,8 @@ static int calendar_devstate_change(const void *data)
 	} else {
 		ast_devstate_changed(AST_DEVICE_BUSY, AST_DEVSTATE_CACHABLE, "Calendar:%s", event->owner->name);
 	}
-
+	
+	ast_debug(10,"calendar_devstate_change: '%s'\n",event->summary);
 	event = ast_calendar_unref_event(event);
 
 	return 0;
@@ -998,6 +1003,7 @@ static int merge_events_cb(void *obj, void *arg, int flags)
 	 * new events remain in the container */
 	ao2_unlink(new_events, new_event);
 	new_event = ast_calendar_unref_event(new_event);
+	ast_debug(10,"merge_events_cb: new_event '%s' \n",new_event?new_event->summary:"ref=0 and gone");
 
 	return 0;
 }
@@ -1229,7 +1235,7 @@ static int calendar_query_exec(struct ast_channel *chan, const char *cmd, char *
 				return -1;
 			}
 		}
-
+		ast_debug(10,"calendar_query_exec: '%s' \n", event->summary);
 		event = ast_calendar_unref_event(event);
 	}
 	ao2_iterator_destroy(&i);
@@ -1472,6 +1478,7 @@ write_cleanup:
 		cal = unref_calendar(cal);
 	}
 	if (event) {
+	  ast_debug(10,"calendar_write_exec: \n");
 		event = ast_calendar_unref_event(event);
 	}
 	if (val_dup) {

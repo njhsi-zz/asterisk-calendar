@@ -157,6 +157,9 @@ static struct ast_str *caldav_request(struct caldav_pvt *pvt, const char *method
 	ne_add_response_body_reader(req, debug_response_handler, fetch_response_reader, &response);
 	ne_set_request_body_buffer(req, ast_str_buffer(req_body), ast_str_strlen(req_body));
 	ne_add_request_header(req, "Content-type", ast_strlen_zero(content_type) ? "text/xml" : content_type);
+	ne_add_request_header(req, "Depth", "1");
+
+	ast_debug(10, "caldav_request: %s %s \n %s \n", method, buf,ast_str_buffer(req_body) );
 
 	ret = ne_request_dispatch(req);
 	ne_request_destroy(req);
@@ -166,6 +169,8 @@ static struct ast_str *caldav_request(struct caldav_pvt *pvt, const char *method
 		ast_free(response);
 		return NULL;
 	}
+
+	ast_debug(10, "caldav_request: response \n %s \n", ast_str_buffer(response) );
 
 	return response;
 }
@@ -271,7 +276,7 @@ write_cleanup:
 	return ret;
 }
 
-static struct ast_str *caldav_get_events_between(struct caldav_pvt *pvt, time_t start_time, time_t end_time)
+static struct ast_str *caldav_get_events_between(struct caldav_pvt *pvt, time_t start_time, time_t end_time, char *vtype)
 {
 	struct ast_str *body, *response;
 	icaltimezone *utc = icaltimezone_get_utc_timezone();
@@ -300,14 +305,14 @@ static struct ast_str *caldav_get_events_between(struct caldav_pvt *pvt, time_t 
 		"      <C:expand start=\"%s\" end=\"%s\"/>\n"
 		"    </C:calendar-data>\n"
 		"  </D:prop>\n"
-		"  <C:filter>\n"
-		"    <C:comp-filter name=\"VCALENDAR\">\n"
-		"      <C:comp-filter name=\"VEVENT\">\n"
-		"        <C:time-range start=\"%s\" end=\"%s\"/>\n"
-		"      </C:comp-filter>\n"
+                "  <C:filter>\n"
+                "    <C:comp-filter name=\"VCALENDAR\">\n"
+                "      <C:comp-filter name=\"%s\">\n"
+                "        <C:time-range start=\"%s\" end=\"%s\"/>\n"
+                "      </C:comp-filter>\n"
 		"    </C:comp-filter>\n"
-		"  </C:filter>\n"
-		"</C:calendar-query>\n", start_str, end_str, start_str, end_str);
+                "  </C:filter>\n"
+		"</C:calendar-query>\n", start_str, end_str, vtype, start_str, end_str);
 
 	response = caldav_request(pvt, "REPORT", body, NULL, NULL);
 	ast_free(body);
@@ -327,7 +332,7 @@ static time_t icalfloat_to_timet(icaltimetype time)
 	tm.tm_mday = time.day;
 	tm.tm_mon = time.month - 1;
 	tm.tm_year = time.year - 1900;
-	tm.tm_hour = time.hour;
+	tm.tm_hour = time.hour-8;
 	tm.tm_min = time.minute;
 	tm.tm_sec = time.second;
 	tm.tm_isdst = -1;
@@ -352,6 +357,7 @@ static void caldav_add_event(icalcomponent *comp, struct icaltime_span *span, vo
 	icaltimetype start, end, tmp;
 	icalcomponent *valarm;
 	icalproperty *prop;
+	icalparameter *param;
 	struct icaltriggertype trigger;
 
 	if (!(pvt && pvt->owner)) {
@@ -364,31 +370,63 @@ static void caldav_add_event(icalcomponent *comp, struct icaltime_span *span, vo
 		return;
 	}
 
+
 	start = icalcomponent_get_dtstart(comp);
-	end = icalcomponent_get_dtend(comp);
+	end = (icalcomponent_isa(comp)==ICAL_VTODO_COMPONENT? icalcomponent_get_due(comp) :icalcomponent_get_dtend(comp));
+
+
+	#if 0
+	const char *start_tzid = icaltime_get_tzid(start);
+	if (!start_tzid) {
+	   prop = icalcomponent_get_first_property(comp, ICAL_DTSTART_PROPERTY);
+	   param = icalproperty_get_first_parameter(prop, ICAL_TZID_PARAMETER);
+	   start_tzid = param?icalparameter_get_tzid (param):start_tzid;
+	}
+        const char *end_tzid = icaltime_get_tzid(end);
+        if (!end_tzid) {
+	  prop = icalcomponent_get_first_property(comp, icalcomponent_isa(comp)==ICAL_VTODO_COMPONENT ? 
+						  ICAL_DUE_PROPERTY:ICAL_DTEND_PROPERTY);
+	  param = icalproperty_get_first_parameter(prop, ICAL_TZID_PARAMETER);
+	  end_tzid = param?icalparameter_get_tzid (param):end_tzid;
+        }
+
+	event->start = start_tzid ? span->start : icalfloat_to_timet(start);
+	event->end = end_tzid ? span->end : icalfloat_to_timet(end);
+	event->busy_state = span->is_busy ? AST_CALENDAR_BS_BUSY : AST_CALENDAR_BS_FREE;
+	#endif
 
 	event->start = icaltime_get_tzid(start) ? span->start : icalfloat_to_timet(start);
-	event->end = icaltime_get_tzid(end) ? span->end : icalfloat_to_timet(end);
-	event->busy_state = span->is_busy ? AST_CALENDAR_BS_BUSY : AST_CALENDAR_BS_FREE;
+        event->end = icaltime_get_tzid(end) ? span->end : icalfloat_to_timet(end);
+        event->busy_state = span->is_busy ? AST_CALENDAR_BS_BUSY : AST_CALENDAR_BS_FREE;
+
+
+	ast_debug(10,"caldav_add_event: enter. comp tzid '%s' start-end '%s'-'%s', span start-end '%d'-'%d' \n", 
+		icaltime_get_tzid(start),icaltime_as_ical_string(start), 
+		icaltime_as_ical_string(end), span->start, span->end);
 
 	if ((prop = icalcomponent_get_first_property(comp, ICAL_SUMMARY_PROPERTY))) {
 		ast_string_field_set(event, summary, icalproperty_get_value_as_string(prop));
+		ast_debug(10,"caldav_add_event: summary '%s'.\n", icalproperty_get_value_as_string(prop));
 	}
 
 	if ((prop = icalcomponent_get_first_property(comp, ICAL_DESCRIPTION_PROPERTY))) {
 		ast_string_field_set(event, description, icalproperty_get_value_as_string(prop));
+		ast_debug(10,"caldav_add_event: desc '%s'.\n", icalproperty_get_value_as_string(prop));
 	}
 
 	if ((prop = icalcomponent_get_first_property(comp, ICAL_ORGANIZER_PROPERTY))) {
 		ast_string_field_set(event, organizer, icalproperty_get_value_as_string(prop));
+		ast_debug(10,"caldav_add_event: org '%s'.\n", icalproperty_get_value_as_string(prop));
 	}
 
 	if ((prop = icalcomponent_get_first_property(comp, ICAL_LOCATION_PROPERTY))) {
 		ast_string_field_set(event, location, icalproperty_get_value_as_string(prop));
+		ast_debug(10,"caldav_add_event: loc '%s'.\n", icalproperty_get_value_as_string(prop));
 	}
 
 	if ((prop = icalcomponent_get_first_property(comp, ICAL_CATEGORIES_PROPERTY))) {
 		ast_string_field_set(event, categories, icalproperty_get_value_as_string(prop));
+		ast_debug(10,"caldav_add_event: categ '%s'.\n", icalproperty_get_value_as_string(prop));
 	}
 
 	if ((prop = icalcomponent_get_first_property(comp, ICAL_PRIORITY_PROPERTY))) {
@@ -416,6 +454,7 @@ static void caldav_add_event(icalcomponent *comp, struct icaltime_span *span, vo
 
 		if (!(attendee = ast_calloc(1, sizeof(*attendee)))) {
 			event = ast_calendar_unref_event(event);
+			ast_log(LOG_WARNING,"caldav_add_event: exit as calloc attendee failed.\n");
 			return;
 		}
 		data = icalproperty_get_attendee(prop);
@@ -432,6 +471,7 @@ static void caldav_add_event(icalcomponent *comp, struct icaltime_span *span, vo
 	 * therefore, go ahead and add events even if their is no VALARM or it is malformed
 	 * Currently we are only getting the first VALARM and are handling repitition in main/calendar.c from calendar.conf */
 	if (!(valarm = icalcomponent_get_first_component(comp, ICAL_VALARM_COMPONENT))) {
+	  ast_log(LOG_WARNING, "VALARM has no VALARM, skipping!\n");
 		ao2_link(pvt->events, event);
 		event = ast_calendar_unref_event(event);
 		return;
@@ -447,7 +487,8 @@ static void caldav_add_event(icalcomponent *comp, struct icaltime_span *span, vo
 	trigger = icalproperty_get_trigger(prop);
 
 	if (icaltriggertype_is_null_trigger(trigger)) {
-		ast_log(LOG_WARNING, "Bad TRIGGER for VALARM, skipping!\n");
+		ast_log(LOG_WARNING, "Bad TRIGGER for VALARM, skipping! - no ,use DTSTART to alarm\n");
+		event->alarm = event->start;
 		ao2_link(pvt->events, event);
 		event = ast_calendar_unref_event(event);
 		return;
@@ -463,9 +504,12 @@ static void caldav_add_event(icalcomponent *comp, struct icaltime_span *span, vo
 		event->alarm = icaltime_as_timet_with_zone(tmp, icaltime_get_timezone(start));
 	}
 
+	if (event->alarm && (event->start-event->alarm>2*24*3600)) event->alarm = event->start;
+	if (!event->alarm && event->priority) event->alarm = event->start;
+
 	ao2_link(pvt->events, event);
 	event = ast_calendar_unref_event(event);
-
+	ast_debug(10,"caldav_add_event: exit end \n");
 	return;
 }
 
@@ -481,7 +525,8 @@ static void handle_start_element(void *data, const xmlChar *fullname, const xmlC
 {
 	struct xmlstate *state = data;
 
-	if (!xmlStrcasecmp(fullname, BAD_CAST "C:calendar-data")) {
+	if (! (xmlStrcasecmp(fullname, BAD_CAST "C:calendar-data") &&
+	       xmlStrcasecmp(fullname, BAD_CAST "cal:calendar-data"))) {
 		state->in_caldata = 1;
 		ast_str_reset(state->cdata);
 	}
@@ -495,7 +540,8 @@ static void handle_end_element(void *data, const xmlChar *name)
 	icalcomponent *iter;
 	icalcomponent *comp;
 
-	if (xmlStrcasecmp(name, BAD_CAST "C:calendar-data")) {
+	if (xmlStrcasecmp(name, BAD_CAST "C:calendar-data") && 
+	    xmlStrcasecmp(name, BAD_CAST "cal:calendar-data")) {
 		return;
 	}
 
@@ -509,9 +555,11 @@ static void handle_end_element(void *data, const xmlChar *name)
 	end = icaltime_from_timet_with_zone(state->end, 0, utc);
 	comp = icalparser_parse_string(ast_str_buffer(state->cdata));
 
-	for (iter = icalcomponent_get_first_component(comp, ICAL_VEVENT_COMPONENT);
-	     iter;
-	     iter = icalcomponent_get_next_component(comp, ICAL_VEVENT_COMPONENT))
+	ast_debug(10,"handle_end_element: state.start-end '%d'-'%d' found component:\n %s \n",state->start,state->end, ast_str_buffer(state->cdata));
+
+	for (iter = icalcomponent_get_first_component(comp, ICAL_ANY_COMPONENT);
+	     iter && (icalcomponent_isa(iter)==ICAL_VTODO_COMPONENT || icalcomponent_isa(iter)==ICAL_VEVENT_COMPONENT);
+	     iter = icalcomponent_get_next_component(comp, ICAL_ANY_COMPONENT))
 	{
 		icalcomponent_foreach_recurrence(iter, start, end, caldav_add_event, state->pvt);
 	}
@@ -546,24 +594,25 @@ static int update_caldav(struct caldav_pvt *pvt)
 
 	start = now.tv_sec;
 	end = now.tv_sec + 60 * pvt->owner->timeframe;
-	if (!(response = caldav_get_events_between(pvt, start, end))) {
-		return -1;
-	}
+        state.start = start;
+        state.end = end;
 
 	if (!(state.cdata = ast_str_create(512))) {
 		ast_free(response);
 		return -1;
 	}
 
-	state.start = start;
-	state.end = end;
-
 	memset(&saxHandler, 0, sizeof(saxHandler));
 	saxHandler.startElement = handle_start_element;
 	saxHandler.endElement = handle_end_element;
 	saxHandler.characters = handle_characters;
 
-	xmlSAXUserParseMemory(&saxHandler, &state, ast_str_buffer(response), ast_str_strlen(response));
+	const char *vtypes[] = {"VTODO","VEVENT"};
+	for (int i =0; i<2; i++) {
+	  if (response = caldav_get_events_between(pvt, start, end, vtypes[i])) {
+	    xmlSAXUserParseMemory(&saxHandler, &state, ast_str_buffer(response), ast_str_strlen(response));	    
+	  }
+	}
 
 	ast_calendar_merge_events(pvt->owner, pvt->events);
 
@@ -572,6 +621,7 @@ static int update_caldav(struct caldav_pvt *pvt)
 
 	return 0;
 }
+
 
 static int verify_cert(void *userdata, int failures, const ne_ssl_certificate *cert)
 {
